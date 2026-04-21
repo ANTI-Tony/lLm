@@ -11,6 +11,11 @@ echo "[setup] nvidia-smi:"; nvidia-smi | head -5
 
 pip install --upgrade pip
 
+# Huginn's modeling uses torch.nn.attention.flex_attention, which only exists
+# in torch>=2.5.0. Upgrade first (pulls matching CUDA wheel automatically).
+pip install --upgrade "torch>=2.5.0"
+python3 -c "import torch; from torch.nn.attention.flex_attention import flex_attention; print(f'torch={torch.__version__} flex_attention OK')"
+
 # Transformers pin matters: Ouro requires <4.56.0; Huginn works with 4.54.1.
 pip install -r requirements.txt
 
