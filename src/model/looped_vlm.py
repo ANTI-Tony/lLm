@@ -130,10 +130,12 @@ class LoopedVLM(nn.Module):
                 f"tokenizer assigned <image> id {tok_assigned} but we expanded "
                 f"embedding to row {self.image_token_id}. Inspect the tokenizer.")
 
-        # Install the vision-aware embedding hook.
+        # Install the vision-aware embedding hook. Huginn doesn't implement
+        # set_input_embeddings, so we locate the embedding attribute manually
+        # and swap it in place.
         original_embed = self.llm.get_input_embeddings()
         self._vision_embed = VisionAwareEmbedding(original_embed, self.image_token_id)
-        self.llm.set_input_embeddings(self._vision_embed)
+        self._replace_submodule(original_embed, self._vision_embed)
 
         self.vision = CLIPVisionModel.from_pretrained(cfg.vision_encoder)
         self.image_processor = CLIPImageProcessor.from_pretrained(cfg.vision_encoder)
@@ -150,7 +152,18 @@ class LoopedVLM(nn.Module):
             for p in self.vision.parameters():
                 p.requires_grad = False
 
-    # ---------- manual embedding expansion (bypasses HF resize) ----------
+    # ---------- manual embedding surgery (bypasses HF resize / set_input) ----
+
+    def _replace_submodule(self, old: nn.Module, new: nn.Module) -> None:
+        """Find `old` in the LLM's module tree and replace it with `new`."""
+        for name, mod in self.llm.named_modules():
+            if mod is old:
+                parent_name, _, attr = name.rpartition('.')
+                parent = (self.llm if not parent_name
+                          else self.llm.get_submodule(parent_name))
+                setattr(parent, attr, new)
+                return
+        raise RuntimeError("could not locate target submodule in LLM")
 
     def _expand_input_embedding(self) -> int:
         """Append one row to the LLM's input embedding matrix. Returns the
@@ -164,14 +177,8 @@ class LoopedVLM(nn.Module):
             new_emb.weight[:old_num].copy_(old.weight)
             nn.init.normal_(new_emb.weight[old_num:], mean=0.0, std=0.02)
 
-        for name, mod in self.llm.named_modules():
-            if mod is old:
-                parent_name, _, attr = name.rpartition('.')
-                parent = (self.llm if not parent_name
-                          else self.llm.get_submodule(parent_name))
-                setattr(parent, attr, new_emb)
-                return old_num
-        raise RuntimeError("could not locate input embedding module in LLM")
+        self._replace_submodule(old, new_emb)
+        return old_num
 
     # ---------- vision encoding ----------
 
