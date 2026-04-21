@@ -16,7 +16,11 @@ train:
   output_dir: "./checkpoints/projector_huginn"
   data_path: "data/llava/llava_pretrain_558k.json"
   image_folder: "data/llava/images"
-  max_samples: 200000          # subset to keep Phase 0 cheap (~$150-250 on A100)
+  # Phase 0 presets (switch in run_phase0.sh by passing --preset):
+  #   fast:     50k samples, num_steps=8  — ~1.5h on A100, enough for H1 decision
+  #   standard: 100k samples, num_steps=8 — ~3h, reusable for Phase 1
+  #   full:     200k samples, num_steps=16 — ~12h, SOTA-ish projector
+  max_samples: 50000
   num_train_epochs: 1
   per_device_train_batch_size: 8
   gradient_accumulation_steps: 4
@@ -24,7 +28,7 @@ train:
   warmup_ratio: 0.03
   weight_decay: 0.0
   max_seq_length: 512
-  num_steps_for_training: 16   # keep num_steps moderate during projector alignment
+  num_steps_for_training: 8
   logging_steps: 20
   save_steps: 2000
   bf16: true
@@ -32,19 +36,20 @@ train:
   dataloader_num_workers: 4
 
 eval:
-  num_steps_sweep: [4, 8, 16, 32, 64]
+  # Fast sweep: 3 points is enough to tell peak-vs-flat. Add 8, 32 later if needed.
+  num_steps_sweep: [4, 16, 64]
   benchmarks:
     mmmu:
       dataset: "lmms-lab/MMMU"
       split: "validation"
-      max_samples: 900
+      max_samples: 300
     mathvista:
       dataset: "lmms-lab/MathVista"
       split: "testmini"
-      max_samples: 1000
+      max_samples: 300
     scienceqa:
       dataset: "derek-thomas/ScienceQA"
       split: "validation"
-      max_samples: 2000
+      max_samples: 500
   max_new_tokens: 64
   output_dir: "./results"

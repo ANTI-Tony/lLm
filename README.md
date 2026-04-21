@@ -105,17 +105,22 @@ python plot_results.py \
 
 ## 预算估算（A100-80GB 单卡，RunPod 约 $1.89/h）
 
-| 步骤 | 时间 | 成本 |
-|------|------|------|
-| setup + 数据下载 | ~1.5h | ~$3 |
-| smoke test | ~5 min | ~$0.2 |
-| projector 训练（200k samples, 1 epoch） | ~14h | ~$27 |
-| MMMU eval (900 题 × 5 steps) | ~1.5h | ~$3 |
-| MathVista eval (1000 题 × 5 steps) | ~1.8h | ~$3.5 |
-| ScienceQA eval (2000 题 × 5 steps) | ~3h | ~$6 |
-| **合计** | **~22h** | **~$43** |
+三档预设，默认是 Fast。选择逻辑：Fast 就能做 H1 判决；只有在 Fast 结果模糊时才升级。
 
-带点 rebuttal 余量：**预留 $80-100**。
+### 🏃 Fast Phase 0（默认 config，推荐）：**~5-6h, ~$12**
+- projector: 50k 样本 · num_steps=8 → ~1.5h
+- eval: 300+300+500 题 × [4,16,64] → ~3.5h
+- 用途：决定 H1 成立与否
+
+### 🚶 Standard Phase 0（`configs/huginn_vlm_standard.yaml`）：**~12-15h, ~$28**
+- projector: 100k 样本 · num_steps=8 → ~3h
+- eval: 900+1000+2000 题 × [4,8,16,32,64] → ~12h
+- 用途：Fast 结果成立后，为论文拿到 publication-grade 曲线
+
+### 🐢 Full（不推荐）：~45h, ~$85
+- projector: 200k 样本 · num_steps=16 → ~35h
+- 我原方案低估了，Huginn 在 num_steps=16 的 forward 等价 26B 算力，比 Vicuna-7B 的 LLaVA pretrain 贵 3-4 倍
+- 只有在你想把 projector 做到 SOTA VLM 水平时才值得
 
 ## 下一步（Phase 0 完成后）
 
