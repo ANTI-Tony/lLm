@@ -21,7 +21,16 @@ if [ ! -d images ]; then
     https://huggingface.co/datasets/liuhaotian/LLaVA-Pretrain/resolve/main/images.zip \
     -O images.zip
   echo "[dl] unzipping ..."
-  unzip -q images.zip -d images
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q images.zip -d images
+  else
+    echo "[dl] unzip not found, falling back to python zipfile ..."
+    python3 -c "
+import zipfile, sys
+with zipfile.ZipFile('images.zip') as z:
+    z.extractall('images')
+"
+  fi
   rm images.zip
 fi
 
