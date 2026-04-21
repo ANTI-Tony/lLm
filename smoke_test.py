@@ -21,6 +21,11 @@ import sys
 from pathlib import Path
 
 import torch
+# Disable cuDNN — the bundled cuDNN 9.19 in torch 2.5.1+cu121 is broken on
+# some RunPod A100 images (CUDNN_STATUS_NOT_INITIALIZED). Huginn uses
+# flex_attention, not cuDNN convs, so no functional impact.
+torch.backends.cudnn.enabled = False
+
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 

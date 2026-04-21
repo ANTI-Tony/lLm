@@ -9,6 +9,9 @@ import torch
 import yaml
 from tqdm import tqdm
 
+# Same cuDNN issue as training: broken cuDNN on this RunPod cu121 image.
+torch.backends.cudnn.enabled = False
+
 from src.model.looped_vlm import LoopedVLM, LoopedVLMConfig
 
 
