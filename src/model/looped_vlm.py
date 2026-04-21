@@ -105,10 +105,7 @@ class LoopedVLM(nn.Module):
         self.cfg = cfg
 
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.llm_name)
-        if cfg.image_placeholder not in self.tokenizer.get_vocab():
-            self.tokenizer.add_tokens([cfg.image_placeholder], special_tokens=True)
-        self.image_token_id = self.tokenizer.convert_tokens_to_ids(
-            cfg.image_placeholder)
+        # image_token_id is set after we expand the model's embedding below.
 
         self.llm = AutoModelForCausalLM.from_pretrained(
             cfg.llm_name,
@@ -116,24 +113,22 @@ class LoopedVLM(nn.Module):
             trust_remote_code=True,
         )
 
-        # Huginn's _init_weights keys on an internal module-id -> name lookup
-        # that is populated only for modules in the original model. A newly
-        # created embedding from resize_token_embeddings is not in that dict,
-        # so it raises KeyError. Patch it to silently fall back — the new row
-        # gets default nn.Embedding init and the VisionAwareEmbedding hook
-        # overwrites it at forward time anyway.
-        _orig_init = self.llm._init_weights
-        def _safe_init(module):
-            try:
-                _orig_init(module)
-            except KeyError:
-                pass
-        self.llm._init_weights = _safe_init
-
-        # mean_resizing=False skips HF's multivariate-normal init for the new
-        # row (1-2 min Cholesky on Huginn's 65536×5280 embedding). Random init
-        # is equivalent here since the hook overwrites the row.
-        self.llm.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
+        # Huginn doesn't implement set_input_embeddings, and its _init_weights
+        # keys on an internal module-id lookup. Both combine to make HF's
+        # resize_token_embeddings fail. Expand the embedding manually instead.
+        # We deliberately do NOT touch the lm_head: the new token id is only
+        # ever used as an input marker, never produced as output, so leaving
+        # the output vocab at 65536 is correct and avoids tied-weight headaches.
+        self.image_token_id = self._expand_input_embedding()
+        # Sync tokenizer so its string -> id mapping matches what we did.
+        self.tokenizer.add_tokens([cfg.image_placeholder], special_tokens=True)
+        tok_assigned = self.tokenizer.convert_tokens_to_ids(cfg.image_placeholder)
+        if tok_assigned != self.image_token_id:
+            # Rare case: tokenizer already had added tokens. Just use the
+            # tokenizer's id and write a second row there too.
+            raise RuntimeError(
+                f"tokenizer assigned <image> id {tok_assigned} but we expanded "
+                f"embedding to row {self.image_token_id}. Inspect the tokenizer.")
 
         # Install the vision-aware embedding hook.
         original_embed = self.llm.get_input_embeddings()
@@ -154,6 +149,29 @@ class LoopedVLM(nn.Module):
         if cfg.freeze_vision:
             for p in self.vision.parameters():
                 p.requires_grad = False
+
+    # ---------- manual embedding expansion (bypasses HF resize) ----------
+
+    def _expand_input_embedding(self) -> int:
+        """Append one row to the LLM's input embedding matrix. Returns the
+        new token's id (= old_vocab_size)."""
+        old = self.llm.get_input_embeddings()
+        old_num, hidden = old.weight.shape
+        dtype, device = old.weight.dtype, old.weight.device
+
+        new_emb = nn.Embedding(old_num + 1, hidden).to(dtype).to(device)
+        with torch.no_grad():
+            new_emb.weight[:old_num].copy_(old.weight)
+            nn.init.normal_(new_emb.weight[old_num:], mean=0.0, std=0.02)
+
+        for name, mod in self.llm.named_modules():
+            if mod is old:
+                parent_name, _, attr = name.rpartition('.')
+                parent = (self.llm if not parent_name
+                          else self.llm.get_submodule(parent_name))
+                setattr(parent, attr, new_emb)
+                return old_num
+        raise RuntimeError("could not locate input embedding module in LLM")
 
     # ---------- vision encoding ----------
 
