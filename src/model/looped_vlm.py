@@ -70,20 +70,32 @@ class VisionAwareEmbedding(nn.Module):
         self._vision_features: Optional[torch.Tensor] = None
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        embeds = self.original(input_ids)
+        base = self.original(input_ids)  # frozen -> no grad
         if self._vision_features is None:
-            return embeds
+            return base
 
+        # In-place assignment (base[b, start:end] = vision) would silently
+        # drop the gradient link from vision back to the projector because
+        # `base` has no grad_fn. Instead we rebuild each sequence with
+        # torch.cat so autograd tracks vision_features through stack/cat.
         B = input_ids.size(0)
         num_patches = self._vision_features.size(1)
+        out_rows = []
         for b in range(B):
             positions = (input_ids[b] == self.image_token_id).nonzero(as_tuple=True)[0]
             if positions.numel() < num_patches:
+                out_rows.append(base[b])
                 continue
             start = positions[0].item()
             end = start + num_patches
-            embeds[b, start:end] = self._vision_features[b].to(embeds.dtype)
-        return embeds
+            row = torch.cat(
+                [base[b, :start],
+                 self._vision_features[b].to(base.dtype),
+                 base[b, end:]],
+                dim=0,
+            )
+            out_rows.append(row)
+        return torch.stack(out_rows, dim=0)
 
     # Proxy common Embedding attributes so resize/tie-weights still work.
     @property
