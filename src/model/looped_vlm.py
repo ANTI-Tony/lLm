@@ -1,35 +1,28 @@
 """
 LoopedVLM: CLIP vision encoder + MLP projector + frozen recurrent-depth LLM.
 
-Design (after smoke test):
-    * The LLM is FROZEN. We only train the projector. Finetuning the LLM would
-      destroy the pretrained loop dynamics and invalidate H1.
-    * CLIP is FROZEN. Standard LLaVA-1.5 recipe.
-    * num_steps is threaded through forward / generate at inference.
+Design:
+    * LLM + CLIP frozen. Only the projector trains. Finetuning the LLM would
+      destroy Huginn's pretrained loop dynamics and invalidate H1.
+    * Vision injection via embedding-layer hook: we wrap Huginn's input
+      embedding layer with VisionAwareEmbedding. When input_ids contains
+      num_patches consecutive image_token_id positions and we have set
+      `_vision_features`, those positions' embeddings are replaced.
+    * With the hook in place, both training (forward with labels) and
+      inference (model.generate()) work through Huginn's normal code paths.
+      This means HF's KV cache machinery kicks in automatically for
+      generation — essential for eval throughput.
 
-Huginn-specific quirk:
-    Huginn's forward signature is
-        forward(input_ids, input_embeds=None, ..., num_steps=None, ...)
-    Note `input_embeds` is singular (non-standard — HF usually uses
-    `inputs_embeds`). We build substituted embeddings ourselves and pass BOTH
-    `input_ids` (required positional) and `input_embeds` (our override).
-
-Token alignment strategy:
-    Each sample contains a single <image> marker in the raw text. The data
-    pipeline expands that one token to `num_image_patches` consecutive
-    image_token_id positions. At forward time we:
-        1. Call the embedding layer on input_ids to get base embeddings.
-        2. Replace the `num_image_patches` image_token_id positions with
-           our CLIP-projected vision features.
-        3. Pass input_ids + input_embeds + attention_mask to the LLM.
-    This guarantees shape consistency (input_ids and input_embeds have the
-    same sequence length) so Huginn's position-id / cache bookkeeping stays
-    valid.
+Why a hook instead of passing input_embeds directly:
+    Huginn's forward accepts input_embeds (singular), but HF's generate()
+    pipeline does not thread that kwarg per-step. Passing input_embeds
+    manually forces us to write a cache-free O(T^2) greedy loop, which is
+    25x too slow for Phase 0 eval.
 """
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -57,6 +50,55 @@ class LoopedVLMConfig:
     image_placeholder: str = IMAGE_PLACEHOLDER
 
 
+class VisionAwareEmbedding(nn.Module):
+    """Drop-in replacement for an nn.Embedding layer.
+
+    Forward behaviour:
+        * Always calls the original embedding on input_ids.
+        * If `_vision_features` is set (shape [B, num_patches, H]) and a
+          sample in the batch has >= num_patches consecutive image_token_id
+          positions, the first num_patches of those positions are overwritten
+          with the projected vision features.
+        * During cached generation, input_ids for new tokens contain no
+          image_token_id, so the hook is a no-op — standard behaviour.
+    """
+
+    def __init__(self, original: nn.Embedding, image_token_id: int):
+        super().__init__()
+        self.original = original
+        self.image_token_id = image_token_id
+        self._vision_features: Optional[torch.Tensor] = None
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        embeds = self.original(input_ids)
+        if self._vision_features is None:
+            return embeds
+
+        B = input_ids.size(0)
+        num_patches = self._vision_features.size(1)
+        for b in range(B):
+            positions = (input_ids[b] == self.image_token_id).nonzero(as_tuple=True)[0]
+            if positions.numel() < num_patches:
+                continue
+            start = positions[0].item()
+            end = start + num_patches
+            embeds[b, start:end] = self._vision_features[b].to(embeds.dtype)
+        return embeds
+
+    # Proxy common Embedding attributes so resize/tie-weights still work.
+    @property
+    def weight(self):
+        return self.original.weight
+
+    @property
+    def num_embeddings(self):
+        return self.original.num_embeddings
+
+    @property
+    def embedding_dim(self):
+        return self.original.embedding_dim
+
+
 class LoopedVLM(nn.Module):
     def __init__(self, cfg: LoopedVLMConfig, torch_dtype=torch.bfloat16):
         super().__init__()
@@ -75,11 +117,16 @@ class LoopedVLM(nn.Module):
         )
         self.llm.resize_token_embeddings(len(self.tokenizer))
 
+        # Install the vision-aware embedding hook.
+        original_embed = self.llm.get_input_embeddings()
+        self._vision_embed = VisionAwareEmbedding(original_embed, self.image_token_id)
+        self.llm.set_input_embeddings(self._vision_embed)
+
         self.vision = CLIPVisionModel.from_pretrained(cfg.vision_encoder)
         self.image_processor = CLIPImageProcessor.from_pretrained(cfg.vision_encoder)
 
         vision_hidden = self.vision.config.hidden_size
-        llm_hidden = self.llm.get_input_embeddings().weight.shape[1]
+        llm_hidden = self._vision_embed.original.weight.shape[1]
         self.projector = build_projector(cfg.projector_type, vision_hidden, llm_hidden)
         self.projector.to(torch_dtype)
 
@@ -101,40 +148,8 @@ class LoopedVLM(nn.Module):
         feats = self.encode_image_frozen(pixel_values)
         return self.projector(feats)  # [B, num_patches, llm_hidden]
 
-    # ---------- embedding substitution ----------
-
-    def _build_input_embeds(
-        self,
-        input_ids: torch.Tensor,
-        projected_vision: torch.Tensor,
-    ) -> torch.Tensor:
-        """input_ids must already contain exactly `num_patches` consecutive
-        image_token_id positions per sample (data pipeline does this).
-        Returns input_embeds with those positions replaced by projected_vision.
-        """
-        embed_layer = self.llm.get_input_embeddings()
-        base = embed_layer(input_ids)  # [B, T, H]
-        B, T, H = base.shape
-        num_patches = projected_vision.size(1)
-
-        for b in range(B):
-            positions = (input_ids[b] == self.image_token_id
-                         ).nonzero(as_tuple=True)[0]
-            if positions.numel() == 0:
-                continue
-            if positions.numel() != num_patches:
-                raise ValueError(
-                    f"sample {b} has {positions.numel()} image tokens but "
-                    f"vision has {num_patches} patches. The data pipeline must "
-                    f"insert exactly num_patches image tokens.")
-            start = positions[0].item()
-            end = positions[-1].item() + 1
-            if end - start != num_patches:
-                raise ValueError(
-                    f"image tokens at sample {b} are not contiguous "
-                    f"(start={start}, end={end}, num_patches={num_patches}).")
-            base[b, start:end, :] = projected_vision[b]
-        return base
+    def _set_vision(self, projected: Optional[torch.Tensor]):
+        self._vision_embed._vision_features = projected
 
     # ---------- forward / generate ----------
 
@@ -146,22 +161,19 @@ class LoopedVLM(nn.Module):
         num_steps: int = 16,
         attention_mask: Optional[torch.Tensor] = None,
     ):
+        projected = None
         if pixel_values is not None:
             projected = self.encode_image(pixel_values)
-            input_embeds = self._build_input_embeds(input_ids, projected)
+            self._set_vision(projected)
+        try:
             return self.llm(
                 input_ids=input_ids,
-                input_embeds=input_embeds,
                 attention_mask=attention_mask,
                 labels=labels,
                 num_steps=num_steps,
             )
-        return self.llm(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-            num_steps=num_steps,
-        )
+        finally:
+            self._set_vision(None)
 
     @torch.no_grad()
     def generate(
@@ -172,10 +184,6 @@ class LoopedVLM(nn.Module):
         max_new_tokens: int = 64,
         gen_config: Optional[GenerationConfig] = None,
     ) -> torch.Tensor:
-        """For the vision path we run a manual greedy loop because the
-        HuggingFace generate() pipeline does not thread `input_embeds` per
-        step. Text-only path still uses model.generate() for speed.
-        """
         if gen_config is None:
             gen_config = GenerationConfig(
                 max_new_tokens=max_new_tokens,
@@ -186,32 +194,20 @@ class LoopedVLM(nn.Module):
                 use_cache=True,
             )
 
-        if pixel_values is None:
+        projected = None
+        if pixel_values is not None:
+            projected = self.encode_image(pixel_values)
+            self._set_vision(projected)
+        try:
             out = self.llm.generate(
                 input_ids,
                 tokenizer=self.tokenizer,
                 num_steps=num_steps,
                 generation_config=gen_config,
             )
-            return out.sequences if hasattr(out, "sequences") else out
-
-        # ----- vision path: manual greedy decode -----
-        device = input_ids.device
-        eos_id = int(gen_config.eos_token_id) if gen_config.eos_token_id is not None else 65505
-        projected = self.encode_image(pixel_values)
-        generated = input_ids.clone()
-        for _ in range(max_new_tokens):
-            input_embeds = self._build_input_embeds(generated, projected)
-            out = self.llm(
-                input_ids=generated,
-                input_embeds=input_embeds,
-                num_steps=num_steps,
-            )
-            next_tok = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            generated = torch.cat([generated, next_tok], dim=1)
-            if (next_tok == eos_id).all():
-                break
-        return generated
+        finally:
+            self._set_vision(None)
+        return out.sequences if hasattr(out, "sequences") else out
 
     # ---------- utilities ----------
 
