@@ -115,7 +115,12 @@ class LoopedVLM(nn.Module):
             torch_dtype=torch_dtype,
             trust_remote_code=True,
         )
-        self.llm.resize_token_embeddings(len(self.tokenizer))
+        # mean_resizing=False skips the multivariate-normal init that HF does
+        # by default. For Huginn (vocab=65536, hidden=5280) that Cholesky takes
+        # 1-2 min and has no value here: the new row for <image> is never read
+        # at forward time — the VisionAwareEmbedding hook overwrites it with
+        # projected vision features.
+        self.llm.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
 
         # Install the vision-aware embedding hook.
         original_embed = self.llm.get_input_embeddings()
