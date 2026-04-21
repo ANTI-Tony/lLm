@@ -241,31 +241,37 @@ class LoopedVLM(nn.Module):
         num_steps: int = 16,
         attention_mask: Optional[torch.Tensor] = None,
     ):
+        # Huginn's iterate_forward splits num_steps into
+        # (num_steps_no_grad, num_steps_with_grad). With a plain int it
+        # dispatches (num_steps, 0) — i.e. every iteration runs inside
+        # torch.no_grad(), which detaches the whole forward from the
+        # autograd graph and makes projector training impossible.
+        # Passing a tuple (0, N) forces all N iterations to run with grad.
+        if isinstance(num_steps, int):
+            huginn_num_steps = (0, num_steps)
+        else:
+            huginn_num_steps = num_steps
+
         if pixel_values is None:
             return self.llm(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 labels=labels,
-                num_steps=num_steps,
+                num_steps=huginn_num_steps,
             )
 
-        # Build input_embeds ourselves via the hook's torch.cat logic so the
-        # projector is guaranteed to participate in the autograd graph. Then
-        # pass input_embeds EXPLICITLY to Huginn — that way it doesn't matter
-        # whether Huginn internally calls self.get_input_embeddings() or
-        # accesses a cached weight reference; either way the grad-bearing
-        # embeddings flow through. (We still set _vision_features so the hook
-        # would substitute if called, as a harmless safety net.)
+        # Build input_embeds via the hook so the projector is on the
+        # autograd graph, then pass explicitly to Huginn.
         projected = self.encode_image(pixel_values)
         self._set_vision(projected)
         try:
-            input_embeds = self._vision_embed(input_ids)  # hook builds via torch.cat
+            input_embeds = self._vision_embed(input_ids)
             return self.llm(
                 input_ids=input_ids,
                 input_embeds=input_embeds,
                 attention_mask=attention_mask,
                 labels=labels,
-                num_steps=num_steps,
+                num_steps=huginn_num_steps,
             )
         finally:
             self._set_vision(None)
@@ -289,6 +295,8 @@ class LoopedVLM(nn.Module):
                 use_cache=True,
             )
 
+        # At inference we want all iterations in no_grad for speed, which is
+        # exactly what Huginn does when given an int. No tuple conversion.
         projected = None
         if pixel_values is not None:
             projected = self.encode_image(pixel_values)
