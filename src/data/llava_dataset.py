@@ -3,10 +3,12 @@
 Expected layout (downloaded via scripts/download_llava.sh):
     data/llava/
         llava_pretrain_558k.json   # conversations file
-        images/                    # flat image dir referenced by `image` field
+        images/                    # image subdirs referenced by `image` field
 
-Each sample's conversations alternate human / gpt turns. For pretrain alignment
-we keep it very simple: one image + one caption-style response.
+Key design: the raw <image> placeholder token is expanded *at __getitem__
+time* to exactly `num_image_patches` consecutive image_token_id positions.
+This keeps input_ids and input_embeds the same length, which Huginn needs
+for position-id / cache bookkeeping.
 """
 
 from __future__ import annotations
@@ -19,6 +21,35 @@ from torch.utils.data import Dataset
 from PIL import Image
 
 IGNORE_INDEX = -100
+
+
+def _expand_image_tokens(
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    image_token_id: int,
+    num_image_patches: int,
+) -> (torch.Tensor, torch.Tensor):
+    """Expand each <image> token (id == image_token_id) into num_image_patches
+    consecutive image tokens. Labels at the expanded positions are set to
+    IGNORE_INDEX. Only supports one image per sample (asserted).
+    """
+    positions = (input_ids == image_token_id).nonzero(as_tuple=True)[0]
+    if positions.numel() == 0:
+        return input_ids, labels
+    assert positions.numel() == 1, \
+        f"expected exactly one <image> token, got {positions.numel()}"
+    img_pos = positions[0].item()
+
+    pre_ids, post_ids = input_ids[:img_pos], input_ids[img_pos + 1:]
+    fill_ids = torch.full((num_image_patches,), image_token_id,
+                          dtype=input_ids.dtype)
+    new_ids = torch.cat([pre_ids, fill_ids, post_ids], dim=0)
+
+    pre_lbl, post_lbl = labels[:img_pos], labels[img_pos + 1:]
+    fill_lbl = torch.full((num_image_patches,), IGNORE_INDEX,
+                          dtype=labels.dtype)
+    new_lbl = torch.cat([pre_lbl, fill_lbl, post_lbl], dim=0)
+    return new_ids, new_lbl
 
 
 class LlavaPretrainDataset(Dataset):
@@ -53,27 +84,23 @@ class LlavaPretrainDataset(Dataset):
     def _load_image(self, rel_path: str) -> torch.Tensor:
         path = self.image_folder / rel_path
         img = Image.open(path).convert("RGB")
-        pixel_values = self.image_processor(images=img, return_tensors="pt")["pixel_values"][0]
+        pixel_values = self.image_processor(images=img, return_tensors="pt"
+                                            )["pixel_values"][0]
         return pixel_values
 
     def __getitem__(self, idx: int) -> Dict:
         sample = self.data[idx]
-        # LLaVA pretrain format: {"image": "xxx.jpg", "conversations": [{from, value}, ...]}
         image_rel = sample["image"]
         convs = sample["conversations"]
 
-        # First human turn contains the <image> placeholder; first gpt turn is target.
         human_text = convs[0]["value"].replace("<image>", self.image_token)
-        # Ensure exactly one <image> token in human_text.
         if self.image_token not in human_text:
             human_text = self.image_token + "\n" + human_text
         target_text = convs[1]["value"].strip()
 
-        # Build prompt with chat-like format. Keep it simple: Q ... A ...
         prompt_text = f"USER: {human_text}\nASSISTANT: "
         full_text = prompt_text + target_text + "\n"
 
-        # Tokenize prompt and full sequence separately to get label mask.
         prompt_ids = self.tokenizer.encode(prompt_text, add_special_tokens=True)
         full_ids = self.tokenizer.encode(full_text, add_special_tokens=True)
 
@@ -81,8 +108,16 @@ class LlavaPretrainDataset(Dataset):
         labels = torch.full_like(input_ids, IGNORE_INDEX)
         labels[len(prompt_ids):] = input_ids[len(prompt_ids):]
 
-        pixel_values = self._load_image(image_rel)
+        # Expand <image> -> N copies NOW so downstream shapes all line up.
+        input_ids, labels = _expand_image_tokens(
+            input_ids, labels, self.image_token_id, self.num_image_patches)
 
+        # Truncate if needed (keep the image block — cut from the tail).
+        if input_ids.size(0) > self.max_seq_length:
+            input_ids = input_ids[: self.max_seq_length]
+            labels = labels[: self.max_seq_length]
+
+        pixel_values = self._load_image(image_rel)
         return {
             "input_ids": input_ids,
             "labels": labels,
@@ -90,76 +125,25 @@ class LlavaPretrainDataset(Dataset):
         }
 
 
-def _expand_labels_for_image(
-    input_ids: torch.Tensor,
-    labels: torch.Tensor,
-    image_token_id: int,
-    num_image_patches: int,
-) -> (torch.Tensor, torch.Tensor):
-    """Given a 1D input_ids/labels pair that contains a single <image> token,
-    expand that slot to `num_image_patches` positions, setting label = IGNORE
-    for those positions. Returns the aligned (expanded_ids, expanded_labels).
+def collate_llava(batch: List[Dict], pad_token_id: int = 65509) -> Dict:
+    """Pad all tensors to the batch max length. input_ids and labels now have
+    matching shape because __getitem__ already expanded <image>."""
+    max_len = max(b["input_ids"].size(0) for b in batch)
 
-    The expanded_ids are returned only to get correct lengths for attention masks
-    — the actual embedding substitution happens in LoopedVLM.build_inputs_embeds
-    using the *original* 1D input_ids, NOT the expanded one. But we still need
-    lengths to line up for `labels`. So we construct expanded_labels of the
-    final length, and we will use them with inputs_embeds from build_inputs_embeds.
-    """
-    mask = (input_ids == image_token_id).nonzero(as_tuple=True)[0]
-    if mask.numel() == 0:
-        return input_ids, labels
-    img_pos = mask[0].item()
-    pre_l = labels[:img_pos]
-    post_l = labels[img_pos + 1:]
-    fill = torch.full((num_image_patches,), IGNORE_INDEX, dtype=labels.dtype)
-    expanded_labels = torch.cat([pre_l, fill, post_l], dim=0)
-    # expanded_ids is not used directly for embeddings, but is useful for debug.
-    pre_i = input_ids[:img_pos]
-    post_i = input_ids[img_pos + 1:]
-    fill_i = torch.full((num_image_patches,), image_token_id, dtype=input_ids.dtype)
-    expanded_ids = torch.cat([pre_i, fill_i, post_i], dim=0)
-    return expanded_ids, expanded_labels
-
-
-def collate_llava(batch: List[Dict], image_token_id: int, num_image_patches: int,
-                  pad_token_id: int = 65509) -> Dict:
-    """Pad, align labels to the inputs_embeds length produced by LoopedVLM."""
-    # Expand labels to match the length AFTER image token substitution.
-    expanded_input_ids = []
-    expanded_labels = []
-    for b in batch:
-        eids, elab = _expand_labels_for_image(
-            b["input_ids"], b["labels"], image_token_id, num_image_patches)
-        expanded_input_ids.append(eids)
-        expanded_labels.append(elab)
-
-    max_len = max(x.size(0) for x in expanded_input_ids)
-
-    def _pad_ids(t, pad_val):
+    def _pad(t, pad_val):
         if t.size(0) == max_len:
             return t
         pad = torch.full((max_len - t.size(0),), pad_val, dtype=t.dtype)
         return torch.cat([t, pad], dim=0)
 
-    padded_input_ids = torch.stack([_pad_ids(x, pad_token_id)
-                                    for x in expanded_input_ids])
-    padded_labels = torch.stack([_pad_ids(x, IGNORE_INDEX)
-                                 for x in expanded_labels])
-    attention_mask = (padded_input_ids != pad_token_id).long()
-
-    # We also need to pass the ORIGINAL (unexpanded) input_ids to the model so
-    # it can do the embedding substitution. Pad those too.
-    orig_max = max(b["input_ids"].size(0) for b in batch)
-    orig_ids = torch.stack([
-        _pad_ids(b["input_ids"], pad_token_id) if b["input_ids"].size(0) < orig_max
-        else b["input_ids"] for b in batch
-    ])
+    input_ids = torch.stack([_pad(b["input_ids"], pad_token_id) for b in batch])
+    labels = torch.stack([_pad(b["labels"], IGNORE_INDEX) for b in batch])
+    attention_mask = (input_ids != pad_token_id).long()
     pixel_values = torch.stack([b["pixel_values"] for b in batch])
 
     return {
-        "input_ids": orig_ids,              # goes into LoopedVLM.forward
-        "labels": padded_labels,            # pre-aligned to inputs_embeds length
-        "attention_mask": attention_mask,   # aligned to inputs_embeds length
+        "input_ids": input_ids,
+        "labels": labels,
+        "attention_mask": attention_mask,
         "pixel_values": pixel_values,
     }

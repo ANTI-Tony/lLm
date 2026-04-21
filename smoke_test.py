@@ -4,10 +4,11 @@ Phase 0 smoke test (text-only).
 Purpose:
     1. Verify Huginn-0125 loads on the rented A100.
     2. Verify num_steps is accepted in forward() and generate().
-    3. Measure latency and simple text accuracy at num_steps in {4, 8, 16, 32, 64}.
-    4. Confirm that forward(inputs_embeds=..., num_steps=...) works — this is the
-       critical path for the LoopedVLM wrapper. If it fails here, the whole plan
-       needs to be redesigned before any VLM work.
+    3. Verify the `input_embeds` (singular!) path works. Huginn uses
+       `input_embeds` rather than the HF-standard `inputs_embeds`. This is
+       the critical hook for the LoopedVLM wrapper.
+    4. Measure latency and sanity-check generations at num_steps in
+       {4, 8, 16, 32, 64}.
 
 Run on RunPod A100:
     python smoke_test.py
@@ -68,19 +69,22 @@ def main():
         print(f"        FAIL: {e}")
         sys.exit(1)
 
-    # Check 2: forward with inputs_embeds (CRITICAL for VLM wrapper)
-    print("\n[check-2] forward(inputs_embeds=..., num_steps=...)  (needed for VLM)")
+    # Check 2: forward with input_embeds (SINGULAR — Huginn's kwarg name).
+    # This is the critical path for LoopedVLM: we inject vision-substituted
+    # embeddings through this.
+    print("\n[check-2] forward(input_ids, input_embeds=..., num_steps=...)  "
+          "(needed for VLM)")
     try:
         embed_layer = model.get_input_embeddings()
         inputs_embeds = embed_layer(input_ids)
         with torch.no_grad():
-            out = model(inputs_embeds=inputs_embeds, num_steps=8)
+            out = model(input_ids=input_ids,
+                        input_embeds=inputs_embeds,
+                        num_steps=8)
         print(f"        OK. logits shape = {tuple(out.logits.shape)}")
         vlm_viable = True
     except Exception as e:
         print(f"        FAIL (VLM path broken): {e}")
-        print("        -> will need to patch modeling code or pre-concat embeddings "
-              "into a custom wrapper.")
         vlm_viable = False
 
     # Check 3: generation with num_steps sweep
@@ -94,7 +98,7 @@ def main():
         use_cache=True,
     )
 
-    results = {"model": args.model, "vlm_inputs_embeds_ok": vlm_viable,
+    results = {"model": args.model, "vlm_input_embeds_ok": vlm_viable,
                "prompts": DEFAULT_PROMPTS, "per_num_steps": {}}
 
     for num_steps in args.num_steps_list:
@@ -128,8 +132,9 @@ def main():
     print(f"\n[info] saved -> {args.output}")
 
     if not vlm_viable:
-        print("\n[IMPORTANT] inputs_embeds path failed. Before running any VLM code, "
-              "inspect modeling_huginn to find the forward signature.")
+        print("\n[IMPORTANT] input_embeds path failed. Open modeling source at:\n"
+              f"  {args.model} -> raven_modeling_minimal.py\n"
+              "to understand the expected signature before continuing.")
         sys.exit(2)
 
 

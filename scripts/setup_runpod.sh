@@ -16,8 +16,12 @@ pip install --upgrade pip
 pip install --upgrade "torch>=2.5.0"
 python3 -c "import torch; from torch.nn.attention.flex_attention import flex_attention; print(f'torch={torch.__version__} flex_attention OK')"
 
-# Transformers pin matters: Ouro requires <4.56.0; Huginn works with 4.54.1.
+# Transformers pin: Huginn's HuginnDynamicCache conflicts with the property
+# refactor of DynamicCache in 4.49+. Force-reinstall 4.48.3 in case the base
+# image shipped a newer one.
 pip install -r requirements.txt
+pip install --force-reinstall --no-deps transformers==4.48.3
+python3 -c "import transformers; print(f'transformers={transformers.__version__}')"
 
 echo "[setup] warming HuggingFace cache for Huginn ..."
 python3 - <<'PY'

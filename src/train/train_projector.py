@@ -87,10 +87,7 @@ def main():
         batch_size=cfg["train"]["per_device_train_batch_size"],
         shuffle=True,
         num_workers=cfg["train"]["dataloader_num_workers"],
-        collate_fn=partial(collate_llava,
-                           image_token_id=vlm.image_token_id,
-                           num_image_patches=num_patches,
-                           pad_token_id=pad_id),
+        collate_fn=partial(collate_llava, pad_token_id=pad_id),
         drop_last=True,
         pin_memory=True,
     )

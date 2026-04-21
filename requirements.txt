@@ -1,5 +1,8 @@
 torch>=2.5.0
-transformers==4.54.1
+# Huginn's HuginnDynamicCache subclass does `self.key_cache = {}`, which
+# conflicts with transformers>=4.49 where DynamicCache.key_cache became a
+# property. 4.48.3 is the last minor release with the old attribute API.
+transformers==4.48.3
 accelerate>=0.30.0
 datasets>=2.18.0
 pillow
