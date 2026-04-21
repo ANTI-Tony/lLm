@@ -16,25 +16,27 @@ train:
   output_dir: "./checkpoints/projector_huginn"
   data_path: "data/llava/llava_pretrain_558k.json"
   image_folder: "data/llava/images"
-  # Phase 0 presets (switch in run_phase0.sh by passing --preset):
-  #   fast:     50k samples, num_steps=8  — ~1.5h on A100, enough for H1 decision
-  #   standard: 100k samples, num_steps=8 — ~3h, reusable for Phase 1
-  #   full:     200k samples, num_steps=16 — ~12h, SOTA-ish projector
-  max_samples: 50000
+
+  # Fast Phase 0 preset (~1.5h on A100-80G).
+  # After fixing the grad bug we learned that num_steps=(0, N) means all N
+  # recurrent iterations carry gradient, so each training step is N× more
+  # expensive than Huginn's default inference mode. Trimming num_steps
+  # to 4 and max_samples to 8k puts us at ~500 optimizer steps × ~10s ≈
+  # 1.5h, enough to get a functional projector for H1 evaluation.
+  #
+  # If results are noisy and you want a higher-quality projector, see
+  # configs/huginn_vlm_standard.yaml.
+  max_samples: 8000
   num_train_epochs: 1
-  # CLIP ViT-L/14-336 emits 576 patches; each sample becomes
-  # (prompt ~20) + 576 image + (response ~50) ≈ 650 tokens. max_seq_length
-  # must be larger than that or the image block gets truncated. Batch 4
-  # compensates for the doubled sequence length.
   per_device_train_batch_size: 4
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 4      # eff batch 16, more optimizer steps per epoch
   learning_rate: 1.0e-3
   warmup_ratio: 0.03
   weight_decay: 0.0
-  max_seq_length: 1024
-  num_steps_for_training: 8
-  logging_steps: 20
-  save_steps: 2000
+  max_seq_length: 1024                # 576 image + ~200 text fits comfortably
+  num_steps_for_training: 4           # halves per-step backprop cost vs ns=8
+  logging_steps: 10
+  save_steps: 250                     # checkpoint midway in case of crash
   bf16: true
   seed: 42
   dataloader_num_workers: 4

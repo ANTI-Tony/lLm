@@ -107,9 +107,10 @@ python plot_results.py \
 
 三档预设，默认是 Fast。选择逻辑：Fast 就能做 H1 判决；只有在 Fast 结果模糊时才升级。
 
-### 🏃 Fast Phase 0（默认 config，推荐）：**~5-6h, ~$12**
-- projector: 50k 样本 · num_steps=8 → ~1.5h
-- eval: 300+300+500 题 × [4,16,64] → ~3.5h
+### 🏃 Fast Phase 0（默认 config，推荐）：**~4-5h, ~$10**
+- projector: 8k 样本 · num_steps=4 → ~1.5h
+  （初版配置低估了 num_steps=(0,N) 全 grad 的成本，已修正）
+- eval: 300+300+500 题 × [4,16,64] → ~3h
 - 用途：决定 H1 成立与否
 
 ### 🚶 Standard Phase 0（`configs/huginn_vlm_standard.yaml`）：**~12-15h, ~$28**
