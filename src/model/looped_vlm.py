@@ -115,11 +115,24 @@ class LoopedVLM(nn.Module):
             torch_dtype=torch_dtype,
             trust_remote_code=True,
         )
-        # mean_resizing=False skips the multivariate-normal init that HF does
-        # by default. For Huginn (vocab=65536, hidden=5280) that Cholesky takes
-        # 1-2 min and has no value here: the new row for <image> is never read
-        # at forward time — the VisionAwareEmbedding hook overwrites it with
-        # projected vision features.
+
+        # Huginn's _init_weights keys on an internal module-id -> name lookup
+        # that is populated only for modules in the original model. A newly
+        # created embedding from resize_token_embeddings is not in that dict,
+        # so it raises KeyError. Patch it to silently fall back — the new row
+        # gets default nn.Embedding init and the VisionAwareEmbedding hook
+        # overwrites it at forward time anyway.
+        _orig_init = self.llm._init_weights
+        def _safe_init(module):
+            try:
+                _orig_init(module)
+            except KeyError:
+                pass
+        self.llm._init_weights = _safe_init
+
+        # mean_resizing=False skips HF's multivariate-normal init for the new
+        # row (1-2 min Cholesky on Huginn's 65536×5280 embedding). Random init
+        # is equivalent here since the hook overwrites the row.
         self.llm.resize_token_embeddings(len(self.tokenizer), mean_resizing=False)
 
         # Install the vision-aware embedding hook.
