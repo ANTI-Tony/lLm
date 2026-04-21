@@ -26,6 +26,11 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+
+# cuDNN 9.19 shipped in torch 2.5.1+cu121 is broken on this RunPod image
+# (CUDNN_STATUS_NOT_INITIALIZED). Disable it here so any script that imports
+# LoopedVLM is protected, not just the training/eval entry points.
+torch.backends.cudnn.enabled = False
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
