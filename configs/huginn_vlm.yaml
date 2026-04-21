@@ -1,0 +1,50 @@
+# Phase 0 configuration: Huginn LLM + CLIP ViT-L/14 + MLP projector
+# Goal: verify whether looped depth helps VLM reasoning on MMMU/MathVista/ScienceQA.
+
+model:
+  llm_name: "tomg-group-umd/huginn-0125"
+  vision_encoder: "openai/clip-vit-large-patch14-336"
+  projector_type: "mlp2x_gelu"
+  llm_hidden_size: 5280        # Huginn hidden size (auto-detect at runtime; update if wrong)
+  vision_hidden_size: 1024     # CLIP ViT-L/14 hidden size
+  freeze_llm: true
+  freeze_vision: true
+  image_token: "<image>"
+  image_token_id: null         # filled at runtime (we use a reserved id)
+
+train:
+  output_dir: "./checkpoints/projector_huginn"
+  data_path: "data/llava/llava_pretrain_558k.json"
+  image_folder: "data/llava/images"
+  max_samples: 200000          # subset to keep Phase 0 cheap (~$150-250 on A100)
+  num_train_epochs: 1
+  per_device_train_batch_size: 8
+  gradient_accumulation_steps: 4
+  learning_rate: 1.0e-3
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  max_seq_length: 512
+  num_steps_for_training: 16   # keep num_steps moderate during projector alignment
+  logging_steps: 20
+  save_steps: 2000
+  bf16: true
+  seed: 42
+  dataloader_num_workers: 4
+
+eval:
+  num_steps_sweep: [4, 8, 16, 32, 64]
+  benchmarks:
+    mmmu:
+      dataset: "lmms-lab/MMMU"
+      split: "validation"
+      max_samples: 900
+    mathvista:
+      dataset: "lmms-lab/MathVista"
+      split: "testmini"
+      max_samples: 1000
+    scienceqa:
+      dataset: "derek-thomas/ScienceQA"
+      split: "validation"
+      max_samples: 2000
+  max_new_tokens: 64
+  output_dir: "./results"
