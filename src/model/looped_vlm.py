@@ -81,9 +81,11 @@ class VisionAwareEmbedding(nn.Module):
         B = input_ids.size(0)
         num_patches = self._vision_features.size(1)
         out_rows = []
+        skipped = []
         for b in range(B):
             positions = (input_ids[b] == self.image_token_id).nonzero(as_tuple=True)[0]
             if positions.numel() < num_patches:
+                skipped.append((b, int(positions.numel())))
                 out_rows.append(base[b])
                 continue
             start = positions[0].item()
@@ -95,6 +97,15 @@ class VisionAwareEmbedding(nn.Module):
                 dim=0,
             )
             out_rows.append(row)
+        if skipped:
+            # Hard-fail rather than silently detach the projector from the
+            # loss graph. This catches data-pipeline bugs early.
+            raise RuntimeError(
+                f"VisionAwareEmbedding: {len(skipped)} batch elements had "
+                f"fewer than {num_patches} image tokens (details: {skipped[:4]}). "
+                "The data pipeline must insert exactly num_image_patches "
+                "image tokens per sample; max_seq_length is likely truncating "
+                "the image block.")
         return torch.stack(out_rows, dim=0)
 
     # Proxy common Embedding attributes so resize/tie-weights still work.

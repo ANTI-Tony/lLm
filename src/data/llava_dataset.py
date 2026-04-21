@@ -112,10 +112,30 @@ class LlavaPretrainDataset(Dataset):
         input_ids, labels = _expand_image_tokens(
             input_ids, labels, self.image_token_id, self.num_image_patches)
 
-        # Truncate if needed (keep the image block — cut from the tail).
+        # Truncate from the tail but DO NOT cut into the image block. If the
+        # sequence is longer than max_seq_length, we truncate the response;
+        # if even the prompt+image alone exceeds the limit, we return a
+        # sentinel and let the caller skip the sample (should be rare after
+        # max_seq_length is set generously).
         if input_ids.size(0) > self.max_seq_length:
+            img_positions = (input_ids == self.image_token_id).nonzero(as_tuple=True)[0]
+            if img_positions.numel() > 0:
+                img_end = int(img_positions[-1].item()) + 1
+                if img_end > self.max_seq_length:
+                    # image block itself doesn't fit — bail via retry
+                    return self.__getitem__((idx + 1) % len(self.data))
             input_ids = input_ids[: self.max_seq_length]
             labels = labels[: self.max_seq_length]
+
+        # Hard invariant: every sample we return must contain exactly
+        # num_image_patches image tokens, else the VisionAwareEmbedding hook
+        # silently skips vision substitution and the projector is detached
+        # from the loss graph.
+        n_img = int((input_ids == self.image_token_id).sum().item())
+        assert n_img == self.num_image_patches, (
+            f"sample {idx} has {n_img} image tokens, expected "
+            f"{self.num_image_patches}. max_seq_length ({self.max_seq_length}) "
+            "is probably too small.")
 
         pixel_values = self._load_image(image_rel)
         return {
