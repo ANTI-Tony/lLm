@@ -236,13 +236,28 @@ class LoopedVLM(nn.Module):
         num_steps: int = 16,
         attention_mask: Optional[torch.Tensor] = None,
     ):
-        projected = None
-        if pixel_values is not None:
-            projected = self.encode_image(pixel_values)
-            self._set_vision(projected)
-        try:
+        if pixel_values is None:
             return self.llm(
                 input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+                num_steps=num_steps,
+            )
+
+        # Build input_embeds ourselves via the hook's torch.cat logic so the
+        # projector is guaranteed to participate in the autograd graph. Then
+        # pass input_embeds EXPLICITLY to Huginn — that way it doesn't matter
+        # whether Huginn internally calls self.get_input_embeddings() or
+        # accesses a cached weight reference; either way the grad-bearing
+        # embeddings flow through. (We still set _vision_features so the hook
+        # would substitute if called, as a harmless safety net.)
+        projected = self.encode_image(pixel_values)
+        self._set_vision(projected)
+        try:
+            input_embeds = self._vision_embed(input_ids)  # hook builds via torch.cat
+            return self.llm(
+                input_ids=input_ids,
+                input_embeds=input_embeds,
                 attention_mask=attention_mask,
                 labels=labels,
                 num_steps=num_steps,
