@@ -22,6 +22,12 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 
+# Disable cuDNN autotune: on some RunPod cu121 images, cuDNN's algorithm
+# benchmarking raises CUDNN_STATUS_NOT_INITIALIZED on the first large Conv2d
+# (CLIP's 14x14 patch embedding). Deterministic algo path avoids it at
+# negligible cost — we only have one Conv2d in the whole pipeline.
+torch.backends.cudnn.benchmark = False
+
 from src.model.looped_vlm import LoopedVLM, LoopedVLMConfig
 from src.data.llava_dataset import LlavaPretrainDataset, collate_llava
 

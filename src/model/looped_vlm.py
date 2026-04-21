@@ -137,7 +137,12 @@ class LoopedVLM(nn.Module):
         self._vision_embed = VisionAwareEmbedding(original_embed, self.image_token_id)
         self._replace_submodule(original_embed, self._vision_embed)
 
-        self.vision = CLIPVisionModel.from_pretrained(cfg.vision_encoder)
+        # Load CLIP in the same dtype as the LLM. Loading in fp32 (the HF
+        # default) then mixing with bf16 activations downstream triggers
+        # cuDNN algorithm-selection issues on some CUDA 12.1 / driver 570
+        # combos; matching dtypes is the cleanest fix.
+        self.vision = CLIPVisionModel.from_pretrained(
+            cfg.vision_encoder, torch_dtype=torch_dtype)
         self.image_processor = CLIPImageProcessor.from_pretrained(cfg.vision_encoder)
 
         vision_hidden = self.vision.config.hidden_size
@@ -184,7 +189,11 @@ class LoopedVLM(nn.Module):
 
     @torch.no_grad()
     def encode_image_frozen(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        outputs = self.vision(pixel_values=pixel_values, output_hidden_states=False)
+        # Cast pixel_values to the vision encoder's dtype to avoid fp32/bf16
+        # mix that upsets cuDNN algorithm selection.
+        pv_dtype = next(self.vision.parameters()).dtype
+        outputs = self.vision(pixel_values=pixel_values.to(pv_dtype),
+                              output_hidden_states=False)
         return outputs.last_hidden_state[:, 1:, :]  # drop [CLS]
 
     def encode_image(self, pixel_values: torch.Tensor) -> torch.Tensor:
