@@ -17,26 +17,28 @@ train:
   data_path: "data/llava/llava_pretrain_558k.json"
   image_folder: "data/llava/images"
 
-  # Fast Phase 0 preset (~1.5h on A100-80G).
-  # After fixing the grad bug we learned that num_steps=(0, N) means all N
-  # recurrent iterations carry gradient, so each training step is N× more
-  # expensive than Huginn's default inference mode. Trimming num_steps
-  # to 4 and max_samples to 8k puts us at ~500 optimizer steps × ~10s ≈
-  # 1.5h, enough to get a functional projector for H1 evaluation.
+  # Fast Phase 0 preset, v2.
+  # v1 (LR 1e-3, 8k samples) collapsed to a degenerate EOS-only solution:
+  # training loss hit 0.005 but inference produced empty strings (0% on
+  # MMMU vs 25% random baseline). LR too high + too few samples let the
+  # projector find a trivial shortcut instead of learning the vision->text
+  # mapping.
   #
-  # If results are noisy and you want a higher-quality projector, see
-  # configs/huginn_vlm_standard.yaml.
-  max_samples: 8000
+  # v2 changes: LR 1e-3 -> 2e-4 (5x lower), samples 8k -> 15k (more data
+  # to dilute shortcuts), warmup 0.03 -> 0.06 (smoother start). Expected
+  # final loss 2-4 (real next-token CE); if it drops below 1 again,
+  # something is still collapsing.
+  max_samples: 15000
   num_train_epochs: 1
   per_device_train_batch_size: 4
-  gradient_accumulation_steps: 4      # eff batch 16, more optimizer steps per epoch
-  learning_rate: 1.0e-3
-  warmup_ratio: 0.03
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-4
+  warmup_ratio: 0.06
   weight_decay: 0.0
-  max_seq_length: 1024                # 576 image + ~200 text fits comfortably
-  num_steps_for_training: 4           # halves per-step backprop cost vs ns=8
+  max_seq_length: 1024
+  num_steps_for_training: 4
   logging_steps: 10
-  save_steps: 250                     # checkpoint midway in case of crash
+  save_steps: 500
   bf16: true
   seed: 42
   dataloader_num_workers: 4
