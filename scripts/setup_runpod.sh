@@ -11,15 +11,15 @@ echo "[setup] nvidia-smi:"; nvidia-smi | head -5
 
 pip install --upgrade pip
 
-# Huginn's modeling uses torch.nn.attention.flex_attention, which only exists
-# in torch>=2.5.0. Pin to 2.5.1 + cu124 wheels because plain "torch>=2.5.0"
-# pulls the latest (2.7+/2.8+) whose CUDA build may be too new for the pod's
-# driver, silently dropping to CPU. If cu124 doesn't match your driver,
-# switch the index-url to cu121.
-pip install --force-reinstall --no-deps \
-    torch==2.5.1 torchvision==0.20.1 \
-    --index-url https://download.pytorch.org/whl/cu124
-python3 -c "import torch; assert torch.cuda.is_available(), 'CUDA not avail after torch install; try cu121 wheel'; print(f'torch={torch.__version__} device={torch.cuda.get_device_name(0)}')"
+# Pin torch 2.5.1 + cu121 wheels. Empirically this is the combo that
+# actually works on RunPod A100 images (driver 570 / CUDA 12.8):
+#   * cu124 wheels installed with --no-deps ended up dropping to CPU
+#   * latest torch (2.7+/2.8+) required a newer driver than the pod has
+# Use non-no-deps so torch pulls its bundled nvidia-* libs cleanly.
+pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
+pip install torch==2.5.1 torchvision==0.20.1 \
+    --index-url https://download.pytorch.org/whl/cu121
+python3 -c "import torch; assert torch.cuda.is_available(), 'CUDA not avail'; print(f'torch={torch.__version__} device={torch.cuda.get_device_name(0)}')"
 python3 -c "from torch.nn.attention.flex_attention import flex_attention; print('flex_attention OK')"
 
 # Transformers pin: Huginn's HuginnDynamicCache conflicts with the property
