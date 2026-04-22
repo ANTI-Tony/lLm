@@ -52,6 +52,14 @@ class LoopedVLMConfig:
     projector_type: str = "mlp2x_gelu"
     freeze_llm: bool = True
     freeze_vision: bool = True
+    # H1 requires the recurrent core to stay untouched. lm_head (output
+    # projection) and ln_f (final layer norm) are NOT part of the loop —
+    # they run once after the recurrent block. Unfreezing them lets the
+    # LLM adapt to the projector's output distribution without changing
+    # loop dynamics, which is essential for making a base (non-instruct)
+    # LLM like Huginn work in a frozen-LLM VLM setup. v1/v2 both
+    # collapsed with everything frozen.
+    unfreeze_coda: bool = True
     image_placeholder: str = IMAGE_PLACEHOLDER
 
 
@@ -190,6 +198,28 @@ class LoopedVLM(nn.Module):
             for p in self.vision.parameters():
                 p.requires_grad = False
 
+        # Unfreeze the coda (non-recurrent output-side params). These run
+        # ONCE after the recurrent loop, so unfreezing them does not change
+        # loop dynamics. Concretely: self.llm.lm_head and
+        # self.llm.transformer.ln_f. We also unfreeze the newly-added
+        # image-token row of the input embedding, though since the hook
+        # overwrites that row's output it shouldn't matter.
+        if cfg.unfreeze_coda:
+            unfrozen = []
+            try:
+                for p in self.llm.lm_head.parameters():
+                    p.requires_grad = True
+                unfrozen.append("lm_head")
+            except AttributeError:
+                pass
+            try:
+                for p in self.llm.transformer.ln_f.parameters():
+                    p.requires_grad = True
+                unfrozen.append("transformer.ln_f")
+            except AttributeError:
+                pass
+            print(f"[info] unfroze coda params: {unfrozen}")
+
     # ---------- manual embedding surgery (bypasses HF resize / set_input) ----
 
     def _replace_submodule(self, old: nn.Module, new: nn.Module) -> None:
@@ -320,11 +350,34 @@ class LoopedVLM(nn.Module):
     # ---------- utilities ----------
 
     def trainable_parameters(self):
-        return [p for p in self.projector.parameters() if p.requires_grad]
+        params = list(self.projector.parameters())
+        # Include unfrozen LLM coda params (lm_head, ln_f) if any.
+        for p in self.llm.parameters():
+            if p.requires_grad:
+                params.append(p)
+        return [p for p in params if p.requires_grad]
 
     def save_projector(self, path: str):
-        torch.save(self.projector.state_dict(), path)
+        """Save projector + any unfrozen coda params so eval can restore them."""
+        state = {"projector": self.projector.state_dict()}
+        coda = {}
+        for p_name, p in self.llm.named_parameters():
+            if p.requires_grad:
+                coda[p_name] = p.detach().cpu()
+        if coda:
+            state["coda"] = coda
+        torch.save(state, path)
 
     def load_projector(self, path: str):
         sd = torch.load(path, map_location="cpu")
-        self.projector.load_state_dict(sd)
+        # Backwards compat: v1/v2 checkpoints saved just the projector dict.
+        if "projector" not in sd:
+            self.projector.load_state_dict(sd)
+            return
+        self.projector.load_state_dict(sd["projector"])
+        if "coda" in sd:
+            llm_sd = dict(self.llm.named_parameters())
+            for k, v in sd["coda"].items():
+                if k in llm_sd:
+                    llm_sd[k].data.copy_(v.to(llm_sd[k].device,
+                                              dtype=llm_sd[k].dtype))
