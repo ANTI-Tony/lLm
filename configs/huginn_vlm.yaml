@@ -59,5 +59,7 @@ eval:
       dataset: "derek-thomas/ScienceQA"
       split: "validation"
       max_samples: 500
-  max_new_tokens: 64
+  # MCQ answers are 1-5 tokens at most ("A", "The answer is B", etc.).
+  # 64 wastes the ~3x slowdown per-sample at num_steps=64 with no upside.
+  max_new_tokens: 16
   output_dir: "./results"
