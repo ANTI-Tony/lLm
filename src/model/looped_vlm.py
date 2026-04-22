@@ -79,18 +79,25 @@ class VisionAwareEmbedding(nn.Module):
         if self._vision_features is None:
             return base
 
-        # In-place assignment (base[b, start:end] = vision) would silently
-        # drop the gradient link from vision back to the projector because
-        # `base` has no grad_fn. Instead we rebuild each sequence with
-        # torch.cat so autograd tracks vision_features through stack/cat.
+        # Three regimes to distinguish:
+        #   (a) positions == 0    — no image in this batch at all. Normal
+        #                           during KV-cached generation of new tokens.
+        #                           Return base unmodified.
+        #   (b) 0 < positions < N — partial image block, indicates truncation
+        #                           or data-pipeline bug. Hard fail.
+        #   (c) positions >= N    — full image block, substitute.
         B = input_ids.size(0)
         num_patches = self._vision_features.size(1)
         out_rows = []
-        skipped = []
+        truncated = []
         for b in range(B):
             positions = (input_ids[b] == self.image_token_id).nonzero(as_tuple=True)[0]
-            if positions.numel() < num_patches:
-                skipped.append((b, int(positions.numel())))
+            npos = positions.numel()
+            if npos == 0:
+                out_rows.append(base[b])
+                continue
+            if npos < num_patches:
+                truncated.append((b, npos))
                 out_rows.append(base[b])
                 continue
             start = positions[0].item()
@@ -102,12 +109,10 @@ class VisionAwareEmbedding(nn.Module):
                 dim=0,
             )
             out_rows.append(row)
-        if skipped:
-            # Hard-fail rather than silently detach the projector from the
-            # loss graph. This catches data-pipeline bugs early.
+        if truncated:
             raise RuntimeError(
-                f"VisionAwareEmbedding: {len(skipped)} batch elements had "
-                f"fewer than {num_patches} image tokens (details: {skipped[:4]}). "
+                f"VisionAwareEmbedding: {len(truncated)} batch elements had "
+                f"0 < image_tokens < {num_patches} (details: {truncated[:4]}). "
                 "The data pipeline must insert exactly num_image_patches "
                 "image tokens per sample; max_seq_length is likely truncating "
                 "the image block.")

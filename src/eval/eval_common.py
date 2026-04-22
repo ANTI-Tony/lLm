@@ -15,6 +15,34 @@ torch.backends.cudnn.enabled = False
 from src.model.looped_vlm import LoopedVLM, LoopedVLMConfig
 
 
+# CLIP ViT-L/14-336 emits 576 patches. Keep in sync with the train config.
+NUM_IMAGE_PATCHES = 576
+
+
+def _expand_image_token(input_ids: torch.Tensor, image_token_id: int,
+                        num_patches: int) -> torch.Tensor:
+    """Expand every single <image> occurrence in each row to num_patches
+    consecutive image_token_id copies, so the VisionAwareEmbedding hook
+    finds enough positions to substitute into."""
+    if input_ids.dim() != 2:
+        raise ValueError(f"expected [B, T], got {input_ids.shape}")
+    out = []
+    for b in range(input_ids.size(0)):
+        row = input_ids[b]
+        pos = (row == image_token_id).nonzero(as_tuple=True)[0]
+        if pos.numel() == 0:
+            out.append(row)
+            continue
+        assert pos.numel() == 1, "more than one <image> per prompt not supported"
+        i = pos[0].item()
+        fill = torch.full((num_patches,), image_token_id,
+                          dtype=row.dtype, device=row.device)
+        new_row = torch.cat([row[:i], fill, row[i + 1:]], dim=0)
+        out.append(new_row)
+    # all same length (single image expansion has constant delta)
+    return torch.stack(out, dim=0)
+
+
 def load_vlm(cfg_path: str, projector_ckpt: str | None = None) -> LoopedVLM:
     with open(cfg_path, "r") as f:
         cfg = yaml.safe_load(f)
@@ -50,6 +78,10 @@ def generate_one(vlm: LoopedVLM, prompt: str, pil_image, num_steps: int,
                              )["pixel_values"].to(device, dtype=torch.bfloat16)
     ids = vlm.tokenizer.encode(prompt, return_tensors="pt",
                                add_special_tokens=True).to(device)
+    # Expand the single <image> placeholder into NUM_IMAGE_PATCHES consecutive
+    # positions so VisionAwareEmbedding has a full image block to substitute
+    # into (matches what LlavaPretrainDataset does during training).
+    ids = _expand_image_token(ids, vlm.image_token_id, NUM_IMAGE_PATCHES)
     seq = vlm.generate(input_ids=ids, pixel_values=px,
                        num_steps=num_steps, max_new_tokens=max_new_tokens)
     # strip the prompt tokens to get only the generated portion.
