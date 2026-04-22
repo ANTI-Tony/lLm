@@ -65,7 +65,10 @@ def main():
     vlm = load_vlm(args.config, projector_ckpt=args.projector)
 
     print("[info] loading MMMU ...")
-    ds = load_dataset(bench["dataset"], "Overall", split=bench["split"])
+    # lmms-lab/MMMU's current HF card only exposes the "default" config
+    # (the "Overall" subset name was deprecated). Pass no name to pick up
+    # the default.
+    ds = load_dataset(bench["dataset"], split=bench["split"])
 
     def iterator():
         n = 0
