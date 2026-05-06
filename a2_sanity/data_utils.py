@@ -17,14 +17,16 @@ def load_gsm8k(split: str = "test"):
     Tries Hugging Face first (in case proxy is reliable); falls back to
     ModelScope mirror (preferred default in this project).
     """
-    # Try HF first only if HF_ENDPOINT is unset and we can reach it.
-    try:
-        from datasets import load_dataset
-        ds = load_dataset("gsm8k", "main", split=split)
-        print(f"[data_utils] gsm8k via HF: {len(ds)} samples")
-        return [{"question": x["question"], "answer": x["answer"]} for x in ds]
-    except Exception as e_hf:
-        pass  # fall through to ModelScope
+    # In-China lab: HF / hf-mirror unreachable. Skip HF, go straight to MS.
+    # If you need HF, set USE_HF_GSM8K=1 to override.
+    if os.environ.get("USE_HF_GSM8K") == "1":
+        try:
+            from datasets import load_dataset
+            ds = load_dataset("gsm8k", "main", split=split)
+            print(f"[data_utils] gsm8k via HF: {len(ds)} samples")
+            return [{"question": x["question"], "answer": x["answer"]} for x in ds]
+        except Exception as e_hf:
+            pass
 
     from modelscope import MsDataset
     ms_split = "test" if split == "test" else "train"
