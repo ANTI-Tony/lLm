@@ -24,12 +24,12 @@ import time
 from pathlib import Path
 
 import torch
-from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).parent))
 from looped_llama import LoopedLlama, LoopedLlamaConfig
+from data_utils import load_gsm8k
 
 torch.backends.cudnn.enabled = False
 
@@ -92,8 +92,8 @@ def main():
     model.eval()
 
     # ---- data ----
-    ds = load_dataset("gsm8k", "main", split="test")
-    samples = [ds[i] for i in range(min(args.max_samples, len(ds)))]
+    ds = load_gsm8k("test")
+    samples = ds[: args.max_samples]
 
     eos_id = tokenizer.eos_token_id
 

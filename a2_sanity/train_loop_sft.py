@@ -17,7 +17,6 @@ import time
 from pathlib import Path
 
 import torch
-from datasets import load_dataset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Dataset
@@ -25,6 +24,7 @@ from transformers import AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).parent))
 from looped_llama import LoopedLlama, LoopedLlamaConfig
+from data_utils import load_gsm8k
 
 torch.backends.cudnn.enabled = False  # avoid the cuDNN issues we hit before
 
@@ -40,9 +40,8 @@ PROMPT_TEMPLATE = (
 class GSM8KSFTDataset(Dataset):
     def __init__(self, tokenizer, split="train", max_samples=1000,
                  max_seq_length=512):
-        ds = load_dataset("gsm8k", "main", split=split)
-        ds = ds.select(range(min(max_samples, len(ds))))
-        self.data = ds
+        ds = load_gsm8k(split)
+        self.data = ds[:max_samples]
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
 
