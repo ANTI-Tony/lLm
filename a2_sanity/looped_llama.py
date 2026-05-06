@@ -66,13 +66,11 @@ class LoopedLlama(nn.Module):
                 f"n_loop_layers={cfg.n_loop_layers} must be < total layers {n_total}")
         self._n_static = n_total - cfg.n_loop_layers
 
-        # Optional LN per iteration to keep activations bounded.
+        # Single shared LN across iterations (Universal Transformer style).
+        # Avoids tying LN count to K so we can change K at forward time.
         if cfg.loop_layernorm:
             hidden = self.llm.config.hidden_size
-            self.loop_lns = nn.ModuleList([
-                nn.LayerNorm(hidden, eps=1e-5)
-                for _ in range(cfg.K)
-            ]).to(torch_dtype)
+            self.loop_ln = nn.LayerNorm(hidden, eps=1e-5).to(torch_dtype)
 
     @classmethod
     def from_pretrained(cls, base_model: str, **kwargs):
@@ -143,7 +141,7 @@ class LoopedLlama(nn.Module):
             if self.cfg.input_injection and h_init is not None:
                 h = h + self.cfg.injection_scale * h_init
             if self.cfg.loop_layernorm:
-                h = self.loop_lns[k](h)
+                h = self.loop_ln(h)
 
         # 6) Final norm + lm_head
         h = self.llm.model.norm(h)
