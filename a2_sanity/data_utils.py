@@ -36,3 +36,25 @@ def load_gsm8k(split: str = "test"):
     out = [{"question": x["question"], "answer": x["answer"]} for x in ds]
     print(f"[data_utils] gsm8k via ModelScope: {len(out)} samples ({split})")
     return out
+
+
+@lru_cache(maxsize=2)
+def load_math500(split: str = "test"):
+    """MATH-500 (Karpathy / Hendrycks subset, 500 problems) via ModelScope.
+
+    Returns list of {question, answer, level, subject} where `answer` is
+    the gold answer in raw LaTeX form (we parse it at scoring time).
+    """
+    from modelscope import MsDataset
+    ds = MsDataset.load("AI-ModelScope/MATH-500", split=split)
+    out = []
+    for x in ds:
+        out.append({
+            "question": x["problem"],
+            "answer": x["answer"],          # LaTeX-form gold
+            "solution": x.get("solution", ""),
+            "level": x.get("level", -1),
+            "subject": x.get("subject", ""),
+        })
+    print(f"[data_utils] MATH-500 via ModelScope: {len(out)} samples ({split})")
+    return out
