@@ -12,6 +12,7 @@ Usage:
 import argparse
 import math
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -98,7 +99,11 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--base_model", default="meta-llama/Llama-3.2-1B")
     p.add_argument("--K", type=int, required=True,
-                   help="loop count during training")
+                   help="loop count during training (ignored if --mixed_K)")
+    p.add_argument("--mixed_K", type=int, nargs="+", default=None,
+                   help="if set, sample K randomly from this list per micro-batch "
+                        "(curriculum / shortcut-consistency style). "
+                        "Overrides --K for the actual training pass.")
     p.add_argument("--n_loop_layers", type=int, default=4)
     p.add_argument("--max_samples", type=int, default=1000)
     p.add_argument("--max_seq_length", type=int, default=512)
@@ -153,18 +158,28 @@ def main():
     optim = AdamW(model.parameters(), lr=args.lr, weight_decay=0.0)
     sched = cosine_schedule(optim, total_steps, args.warmup_ratio)
 
+    # ---- mixed-K logging ----
+    if args.mixed_K:
+        print(f"[info] MIXED-K curriculum: K sampled per micro-batch from {args.mixed_K}")
+        rng = random.Random(args.seed)
+    else:
+        print(f"[info] fixed K={args.K} per micro-batch")
+
     # ---- train loop ----
     optim.zero_grad()
     global_step = 0
     t0 = time.time()
     running = 0.0
+    K_seen = []  # for diagnostic histogram
     for epoch in range(args.epochs):
         for step, batch in enumerate(loader):
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+            K_step = (rng.choice(args.mixed_K) if args.mixed_K else args.K)
+            K_seen.append(K_step)
             out = model(input_ids=batch["input_ids"],
                         attention_mask=batch["attention_mask"],
                         labels=batch["labels"],
-                        K=args.K)
+                        K=K_step)
             loss = out.loss / args.grad_accum
             loss.backward()
             running += loss.item() * args.grad_accum
@@ -183,6 +198,13 @@ def main():
                           f"loss={avg:.3f}  lr={lr:.2e}  sec={elapsed:.0f}",
                           flush=True)
                     running = 0.0
+
+    # ---- mixed-K diagnostic histogram ----
+    if args.mixed_K:
+        from collections import Counter
+        hist = Counter(K_seen)
+        print(f"[info] mixed-K histogram: "
+              f"{dict(sorted(hist.items()))}  total={len(K_seen)}")
 
     # ---- save ----
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
